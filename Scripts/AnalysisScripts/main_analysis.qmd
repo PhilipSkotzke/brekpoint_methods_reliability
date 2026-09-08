@@ -1,0 +1,884 @@
+---
+title: Computational Notebook
+subtitle: Main Analysis for BP test-retest reliability
+date: today
+format:
+  html:
+    toc: true
+    toc-location: right-body
+    toc-depth: 3
+    toc-title: Contents
+    embed-resources: true
+    self-contained-math: true
+    code-fold: true
+    theme: lumen
+    number-sections: false
+    #number-depth: 2
+
+---
+
+```{r Set-Up}
+#| output: false
+
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+library(rstatix)
+library(SimplyAgree)
+library(boot.pval)
+library(tidytext)
+library(scales)
+
+set_theme(theme_bw())
+```
+
+# Background
+
+a lot of reasearch interest has been focues on identifying breakpoints in NIRS-derived measures. Some published studies find no signficant difference between methods, other studies report that breakpoints appear at a different workload. One of the challenges in these studies are that - even when the mean difference between methods is low, the individual differences show low agreement. The main contributing factor to the low individual-level agreement may be the day-to-day variability of the NIRS breakpoints or the reference threshold.
+While the day-to-day variability for ventilatory and lactate thresholds has been extensively investigated, little is known about the test-retest reliability of NIRS breakpoints. To add, a wide range of NIRS breakpoint methods has been proposed but for most only criterion valditiy has been investigated.
+Therefore, the objective of this exploratory analysis is to compute multiple breakpoint methods on a pre-existing data set of repeated incremental cycling tests and to report their test-retest reliability. This analysis will reveal potential differences between breakpoint methods, informing future studies on criterion validity and physiological interpretation of NIRS breakpoints.
+
+### Sample
+
+### Data Preprocessing
+
+### Breakpoint methods applied
+
+1Methods for BP1:
+
+1. Visual identification
+2. double segmented on the full data (raw)
+3. double segmented on the stage mean SmO~2~
+4. double segmented on the slope per stage
+5. double segmented on the power/SmO~2~ ratio
+6. log-log method on stage mean SmO~2~
+7. log-log method on the power/SmO~2~ ratio
+8. second derivative of 4th degree polynomial (1st inflection)
+
+Methods for BP2:
+
+1. Visual identification
+2. double segmented on the full data (raw)
+3. double segmented on the stage mean SmO~2~
+4. double segmented on the slope per stage
+5. double segmented on the power/SmO~2~ ratio
+6. Dmax method on stage mean SmO~2~
+7. Dmax method on the power/SmO~2~ ratio
+8. modDmax method on stage mean SmO~2~
+9. modDmax method on power/SmO~2~ ratio
+10. second derivative of 4th degree polynomial (2nd inflection)
+
+## Load the data
+
+The data was produced in the pre-processing pipeline, taking the raw recordings, applying smoothing, filtering (with `{mnirs}`) and calculating the different breakpoints.
+
+```{r load-data}
+dat <- read.csv("../../Data/AnalysisData/breakpoint_data.csv") |>
+  mutate(bp2_type = NA_character_)
+
+ratings <- read.csv("../../Data/ManualRatings/Rater_A_ratings.csv") |>
+  mutate(
+    method  = paste0("visual_", rater),
+    warning = ifelse(!identifiable, "not_identifiable", NA_character_)
+  ) |>
+  select(session_id, channel, method, bp, bp_x, warning, power, bp2_type)
+
+dat <- bind_rows(dat, ratings) |>
+  mutate(
+    id   = sub("_.*", "", session_id),
+    test = sub(".*_", "", session_id)
+  )
+
+dat |> 
+    ggplot(aes(power, method, color = id)) +
+    geom_point() +
+    facet_grid(bp ~ channel)
+
+# now get subsets for dom, ndom and avg
+
+dat_dom <- dat |> 
+  dplyr::filter(channel == "smo2_dom")
+
+dat_ndom <- dat |> 
+  dplyr::filter(channel == "smo2_ndom")
+
+dat_avg <- dat |> 
+  dplyr::filter(channel == "smo2_avg")
+
+dat_dom_wide <- dat_dom |>
+  pivot_wider(
+    id_cols    = c(id, method, bp),
+    names_from = test,
+    values_from = power,
+    names_prefix = "T"
+  ) |>
+  mutate(
+    mean_power = apply(pick(T01, T02, T03), 1, mean, na.rm = TRUE),
+    sd_power   = apply(pick(T01, T02, T03), 1, sd,   na.rm = TRUE),
+    cv_power   = sd_power / mean_power * 100,
+    channel    = "DOM"
+  )
+
+dat_ndom_wide <- dat_ndom |>
+  pivot_wider(
+    id_cols    = c(id, method, bp),
+    names_from = test,
+    values_from = power,
+    names_prefix = "T"
+  ) |>
+  mutate(
+    mean_power = apply(pick(T01, T02, T03), 1, mean, na.rm = TRUE),
+    sd_power   = apply(pick(T01, T02, T03), 1, sd,   na.rm = TRUE),
+    cv_power   = sd_power / mean_power * 100,
+    channel    = "NDOM"
+  )
+
+dat_avg_wide <- dat_avg |>
+  pivot_wider(
+    id_cols    = c(id, method, bp),
+    names_from = test,
+    values_from = power,
+    names_prefix = "T"
+  ) |>
+  mutate(
+    mean_power = apply(pick(T01, T02, T03), 1, mean, na.rm = TRUE),
+    sd_power   = apply(pick(T01, T02, T03), 1, sd,   na.rm = TRUE),
+    cv_power   = sd_power / mean_power * 100,
+    channel    = "AVG"
+  )
+
+dat_all_wide <- bind_rows(dat_dom_wide, dat_ndom_wide, dat_avg_wide)
+```
+
+## Assumption testing
+
+Before proceeding to get estimands for test-retest reliability, test some assumptions.
+
+### Normality
+
+Look at q-q plots and run a Shapiro-Wilk
+```{r normality}
+
+# for DOM
+dat_dom |> 
+  ggplot(aes(sample = power)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_grid(bp ~ method) +
+  labs(title = "QQ plots Breakpoints DOM")
+
+dat_dom |> 
+  group_by(method, bp) |> 
+  rstatix::shapiro_test(power)
+
+# for NDOM
+dat_ndom |> 
+  ggplot(aes(sample = power)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_grid(bp ~ method) +
+  labs(title = "QQ plots Breakpoints NDOM")
+
+dat_ndom |> 
+  group_by(method, bp) |> 
+  rstatix::shapiro_test(power)
+# for AVG
+dat_avg |> 
+  ggplot(aes(sample = power)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_grid(bp ~ method) +
+  labs(title = "QQ plots Breakpoints AVG")
+
+dat_dom |> 
+  group_by(method, bp) |> 
+  rstatix::shapiro_test(power)
+```
+
+Both the inferential test and the q-q plots show that normality can not be assumed for most methods. This becomes relevant for checking for systematic trial effects on breakponits. The violation of normality doesn't affect ICC with CIs, point estimates but CI. Use Bootstrap to get information on uncertainty.
+
+### Homoscedasticity
+
+Homoscedasticity of within-subject variability is assessed by plotting absolute pairwise differences against the mean threshold, for each method.
+
+```{r homosced}
+
+# for dom
+# formal test using rank-order correlation
+dat_dom_wide |>
+  group_by(method, bp) |>
+  filter(!is.na(T01) & !is.na(T02)) |>
+  summarize(
+    tryCatch(
+      broom::tidy(
+        cor.test(abs(T01 - T02), (T01 + T02) / 2,
+        method = "spearman", exact = FALSE)
+      ) |> select(estimate, p.value),
+      error = function(e) tibble(estimate = NA_real_, p.value = NA_real_)
+    ),
+    n = n(),
+    .groups = "drop"
+  ) |>
+  select(method, bp, rho = estimate, p.value, n)
+
+  # Visual (primary evidence) — faceted across all 12 panels
+dat_dom_wide |>
+  filter(!is.na(T01), !is.na(T02)) |>
+  mutate(
+    abs_diff = abs(T01 - T02),
+    mean_val = (T01 + T02) / 2,
+    bp = factor(bp, levels = c(1, 2), labels = c("BP1", "BP2"))
+  ) |>
+  ggplot(aes(x = mean_val, y = abs_diff)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE, color = "red") +
+  facet_grid(bp ~ method) +
+  labs(x = "Mean (T01+T02)/2", y = "|T01 - T02|",
+       title = "Homoscedasticity check DOM")
+
+# for ndom
+# formal test using rank-order correlation
+dat_ndom_wide |>
+  group_by(method, bp) |>
+  filter(!is.na(T01) & !is.na(T02)) |>
+  summarize(
+    tryCatch(
+      broom::tidy(
+        cor.test(abs(T01 - T02), (T01 + T02) / 2,
+        method = "spearman", exact = FALSE)
+      ) |> select(estimate, p.value),
+      error = function(e) tibble(estimate = NA_real_, p.value = NA_real_)
+    ),
+    n = n(),
+    .groups = "drop"
+  ) |>
+  select(method, bp, rho = estimate, p.value, n)
+
+# Visual (primary evidence) — faceted across all 12 panels
+dat_ndom_wide |>
+  filter(!is.na(T01), !is.na(T02)) |>
+  mutate(
+    abs_diff = abs(T01 - T02),
+    mean_val = (T01 + T02) / 2,
+    bp = factor(bp, levels = c(1, 2), labels = c("BP1", "BP2"))
+  ) |>
+  ggplot(aes(x = mean_val, y = abs_diff)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE, color = "red") +
+  facet_grid(bp ~ method) +
+  labs(x = "Mean (T01+T02)/2", y = "|T01 - T02|",
+       title = "Homoscedasticity check NDOM")
+
+# for avg
+# formal test using rank-order correlation
+dat_avg_wide |>
+  group_by(method, bp) |>
+  filter(!is.na(T01) & !is.na(T02)) |>
+  summarize(
+    tryCatch(
+      broom::tidy(
+        cor.test(abs(T01 - T02), (T01 + T02) / 2,
+        method = "spearman", exact = FALSE)
+      ) |> select(estimate, p.value),
+      error = function(e) tibble(estimate = NA_real_, p.value = NA_real_)
+    ),
+    n = n(),
+    .groups = "drop"
+  ) |>
+  select(method, bp, rho = estimate, p.value, n)
+
+# Visual (primary evidence) — faceted across all 12 panels
+dat_avg_wide |>
+  filter(!is.na(T01), !is.na(T02)) |>
+  mutate(
+    abs_diff = abs(T01 - T02),
+    mean_val = (T01 + T02) / 2,
+    bp = factor(bp, levels = c(1, 2), labels = c("BP1", "BP2"))
+  ) |>
+  ggplot(aes(x = mean_val, y = abs_diff)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE, color = "red") +
+  facet_grid(bp ~ method) +
+  labs(x = "Mean (T01+T02)/2", y = "|T01 - T02|",
+       title = "Homoscedasticity check AVG")
+```
+
+Based on the many comparisons, no clear conclusion can be drawn. However, it appears that for most comparisons between T01 and T02 the rank order is low for DOM but higher for NDOM and AVG, potentially driven by extreme outliers. Proceed as follows:
+
+Calculate both the SD and CV as measure of variability and report both for all methods.
+
+### Systematic trial effect
+
+With non-normal data, simply use Friedman test to look at order effects.
+
+```{r order-effect}
+
+# for DOM
+dat_dom |>
+  group_by(method, bp, id) |>
+  filter(n() == 3, !any(is.na(power))) |>
+  group_by(method, bp) |>
+  nest() |>
+  mutate(result = map(data, \(d) {
+    tryCatch({
+      res <- friedman.test(power ~ test | id, data = d)
+      tibble(statistic = res$statistic, df = res$parameter, p.value = res$p.value)
+    }, error = function(e) {
+      tibble(statistic = NA_real_, df = NA_integer_, p.value = NA_real_)
+    })
+  })) |>
+  select(-data) |>
+  unnest(result)
+
+# for NDOM
+dat_ndom |>
+  group_by(method, bp, id) |>
+  filter(n() == 3, !any(is.na(power))) |>
+  group_by(method, bp) |>
+  nest() |>
+  mutate(result = map(data, \(d) {
+    tryCatch({
+      res <- friedman.test(power ~ test | id, data = d)
+      tibble(statistic = res$statistic, df = res$parameter, p.value = res$p.value)
+    }, error = function(e) {
+      tibble(statistic = NA_real_, df = NA_integer_, p.value = NA_real_)
+    })
+  })) |>
+  select(-data) |>
+  unnest(result)
+
+# for NDOM
+dat_avg |>
+  group_by(method, bp, id) |>
+  filter(n() == 3, !any(is.na(power))) |>
+  group_by(method, bp) |>
+  nest() |>
+  mutate(result = map(data, \(d) {
+    tryCatch({
+      res <- friedman.test(power ~ test | id, data = d)
+      tibble(statistic = res$statistic, df = res$parameter, p.value = res$p.value)
+    }, error = function(e) {
+      tibble(statistic = NA_real_, df = NA_integer_, p.value = NA_real_)
+    })
+  })) |>
+  select(-data) |>
+  unnest(result)
+```
+
+Friedman test returns non-significant effects. Thus, we conlcude no relevant order effects on breakpoints.
+
+## Breakpoint differences between sides
+
+First, compare the power output at BP1 and BP2 between DOM, NDOM and AVG. Because normalitiy may not be assumed, compare via pairwise bootstrap.
+
+```{r side-diff-pwr}
+
+dat_diff <- dat |>
+  mutate(channel = gsub("smo2_", "", channel)) |>   # smo2_dom → dom etc.
+  pivot_wider(
+    id_cols     = c(id, test, session_id, method, bp),
+    names_from  = channel,
+    values_from = c(power, bp_x)                    # keep both metrics wide
+  )
+
+set.seed(42)
+
+side_diff_all <- dat_diff |>
+  drop_na(power_dom, power_ndom, power_avg) |>
+  group_by(method, bp) |>
+  nest() |>
+  mutate(result = map(data, \(d) {
+    if (nrow(d) < 3) return(tibble(
+      comparison = character(), n = integer(), mean_diff = numeric(),
+      ci_lower = numeric(), ci_upper = numeric(), p_raw = numeric()
+    ))
+    tests <- list(
+      dom_vs_ndom = boot_t_test(d$power_dom,  d$power_ndom, paired = TRUE, R = 9999),
+      dom_vs_avg  = boot_t_test(d$power_dom,  d$power_avg,  paired = TRUE, R = 9999),
+      ndom_vs_avg = boot_t_test(d$power_ndom, d$power_avg,  paired = TRUE, R = 9999)
+    )
+    tibble(
+      comparison = names(tests),
+      n          = nrow(d),
+      mean_diff  = c(
+        mean(d$power_dom  - d$power_ndom, na.rm = TRUE),
+        mean(d$power_dom  - d$power_avg,  na.rm = TRUE),
+        mean(d$power_ndom - d$power_avg,  na.rm = TRUE)
+      ),
+      ci_lower = map_dbl(tests, \(t) t$conf.int[1]),
+      ci_upper = map_dbl(tests, \(t) t$conf.int[2]),
+      p_raw    = map_dbl(tests, "p.value")
+    )
+  })) |>
+  select(-data) |>
+  unnest(result) |>
+  mutate(sig = p_raw < 0.05)
+
+side_diff_all
+
+side_diff_all |>
+   filter(n >= 12) |>
+  mutate(
+    p_label = case_when(
+      is.na(p_raw)  ~ "",
+      p_raw < 0.001 ~ "p < .001",
+      TRUE          ~ paste0("p = ", round(p_raw, 3))
+    )
+  ) |>
+  ggplot(aes(mean_diff, method)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_linerange(aes(xmin = ci_lower, xmax = ci_upper, color = sig)) +
+  geom_point(aes(color = sig)) +
+  geom_text(aes(x = Inf, label = p_label), hjust = 1.05, size = 2.8) +
+  scale_color_manual(values = c("FALSE" = "black", "TRUE" = "#e63946"),
+                     labels = c("ns", "p < .05")) +
+  facet_wrap(bp ~ comparison) +
+  labs(x = "Mean difference (W)", y = NULL, color = NULL) +
+    theme(legend.position = "bottom")
+
+```
+
+## Reliability quantification per method
+
+### Failed breakpoint identification
+
+A total of **36** tests were inclucded (12 participants * 3 tests).
+
+First, look at the number of breakpoints that could not be identified by method.
+
+```{r bp-failed}
+
+bp_failed <- bind_rows(
+  dat_dom  |> group_by(method, bp) |> summarize(n_total = n(), failed = sum(is.na(power)), .groups = "drop") |> mutate(channel = "DOM"),
+  dat_ndom |> group_by(method, bp) |> summarize(n_total = n(), failed = sum(is.na(power)), .groups = "drop") |> mutate(channel = "NDOM"),
+  dat_avg  |> group_by(method, bp) |> summarize(n_total = n(), failed = sum(is.na(power)), .groups = "drop") |> mutate(channel = "AVG")
+) |>
+  mutate(
+    pct_failed  = round(failed / n_total * 100),
+    low_success = (100 - pct_failed) < 33
+  )
+
+exclude_combos <- bp_failed |>
+  filter(low_success) |>
+  select(method, channel, bp)
+
+bp_failed |>
+  mutate(
+    bp    = factor(bp, labels = c("BP1", "BP2")),
+    label = paste0(failed, "\n(", pct_failed, "%)")
+  ) |>
+  ggplot(aes(x = channel, y = method, fill = pct_failed)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = label), size = 2.8, lineheight = 0.9) +
+  scale_fill_gradient(low = "#f0fdf4", high = "#ef4444",
+                      name = "% failed", limits = c(0, 100)) +
+  facet_wrap(~ bp) +
+  labs(x = NULL, y = NULL, title = "Failed breakpoint estimates per method")
+
+
+```
+
+Then, look which type of visual BP2s were identified.
+
+```{r bp2-visual-type}
+
+bp2_visual <- dat |>
+  filter(!is.na(bp2_type)) |>
+  group_by(channel, bp2_type) |>
+  summarize(n = n(), .groups = "drop")
+
+bp2_visual |> 
+  group_by(channel) |>
+  mutate(pct = n / sum(n)) |>
+  ggplot(aes(x = channel, y = pct, fill = bp2_type)) +
+  geom_col() +
+  geom_text(aes(label = n), position = position_stack(vjust = 0.5), size = 3) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = c("flat" = "#60a5fa", "deoxy" = "#f87171")) +
+  labs(x = NULL, y = NULL, fill = "BP2 type",
+       title = "Visual BP2 type by channel")
+
+```
+
+### Reliability statistics
+
+Calculate ICC(2,1) with 95% CI for each method. Select absolute agreement, two-way random effects, single measures.
+
+```{r ICC}
+
+icc_dom <- dat_dom_wide |>
+  group_by(method, bp) |>
+  nest() |>
+  mutate(result = map(data, \(d) {
+    tryCatch({
+      res <- SimplyAgree::reli_stats(
+        data = d, wide = TRUE, col.names = c("T01", "T02", "T03")
+      )
+      tibble(
+        n         = res$n.id,
+        icc       = res$icc$icc[res$icc$type == "ICC2"],
+        icc_lower = res$icc$lower.ci[res$icc$type == "ICC2"],
+        icc_upper = res$icc$upper.ci[res$icc$type == "ICC2"],
+        sem       = res$SEM$estimate,
+        cv        = res$cv$estimate,
+        mdc95     = res$SEM$estimate * 1.96 * sqrt(2)
+      )
+    }, error = function(e) {
+      tibble(n = NA_integer_, icc = NA_real_, icc_lower = NA_real_, icc_upper = NA_real_,
+             sem = NA_real_, cv = NA_real_, mdc95 = NA_real_)
+    })
+  })) |>
+  select(-data) |>
+  unnest(result) |>
+  mutate(channel = "DOM")
+
+icc_ndom <- dat_ndom_wide |>
+  group_by(method, bp) |>
+  nest() |>
+  mutate(result = map(data, \(d) {
+    tryCatch({
+      res <- SimplyAgree::reli_stats(
+        data = d, wide = TRUE, col.names = c("T01", "T02", "T03")
+      )
+      tibble(
+        n         = res$n.id,
+        icc       = res$icc$icc[res$icc$type == "ICC2"],
+        icc_lower = res$icc$lower.ci[res$icc$type == "ICC2"],
+        icc_upper = res$icc$upper.ci[res$icc$type == "ICC2"],
+        sem       = res$SEM$estimate,
+        cv        = res$cv$estimate,
+        mdc95     = res$SEM$estimate * 1.96 * sqrt(2)
+      )
+    }, error = function(e) {
+      tibble(n = NA_integer_, icc = NA_real_, icc_lower = NA_real_, icc_upper = NA_real_,
+             sem = NA_real_, cv = NA_real_, mdc95 = NA_real_)
+    })
+  })) |>
+  select(-data) |>
+  unnest(result) |>
+  mutate(channel = "NDOM")
+
+icc_avg <- dat_avg_wide |>
+  group_by(method, bp) |>
+  nest() |>
+  mutate(result = map(data, \(d) {
+    tryCatch({
+      res <- SimplyAgree::reli_stats(
+        data = d, wide = TRUE, col.names = c("T01", "T02", "T03")
+      )
+      tibble(
+        n         = res$n.id,
+        icc       = res$icc$icc[res$icc$type == "ICC2"],
+        icc_lower = res$icc$lower.ci[res$icc$type == "ICC2"],
+        icc_upper = res$icc$upper.ci[res$icc$type == "ICC2"],
+        sem       = res$SEM$estimate,
+        cv        = res$cv$estimate,
+        mdc95     = res$SEM$estimate * 1.96 * sqrt(2)
+      )
+    }, error = function(e) {
+      tibble(n = NA_integer_, icc = NA_real_, icc_lower = NA_real_, icc_upper = NA_real_,
+             sem = NA_real_, cv = NA_real_, mdc95 = NA_real_)
+    })
+  })) |>
+  select(-data) |>
+  unnest(result) |>
+  mutate(channel = "AVG")
+
+icc_all <- bind_rows(icc_dom, icc_ndom, icc_avg)
+
+# plot the results ordered by icc
+icc_all <- icc_all |> 
+  group_by(bp) |> 
+  arrange(desc(icc)) |> 
+  ungroup() |> 
+  mutate(combination = interaction(channel, method, sep = "_"))
+
+icc_all <- icc_all |> 
+  group_by(bp) |> 
+  arrange(desc(icc)) |> 
+  ungroup() |> 
+  mutate(combination = interaction(channel, method, sep = "_"))
+
+dir.create("../../Data/AnalysisData", showWarnings = FALSE, recursive = TRUE)
+saveRDS(icc_all, "../../Data/AnalysisData/icc_all.rds")
+
+icc_all |>
+  # filter(n >= 12) |>
+  anti_join(exclude_combos, by = c("method", "channel", "bp")) |>
+  ggplot(aes(x = icc, y = tidytext::reorder_within(combination, icc, bp), color = channel)) +
+  geom_point() +
+  geom_pointrange(aes(xmin = icc_lower, xmax = icc_upper)) +
+  tidytext::scale_y_reordered() +
+  facet_wrap(~ bp, scales = "free_y") +
+  labs(x = "ICC(2,1)", y = NULL) +
+  theme(legend.position = "bottom")
+
+icc_all |>
+  # filter(n >= 12) |>
+  anti_join(exclude_combos, by = c("method", "channel", "bp")) |>
+  ggplot(aes(x = sem, y = tidytext::reorder_within(combination, -sem, bp), fill = channel)) +
+  geom_bar(stat = "identity") +
+  tidytext::scale_y_reordered() +
+  facet_wrap(~ bp, scales = "free_y") +
+  labs(x = "SEM [W]", y = NULL) +
+  theme(legend.position = "bottom")
+
+icc_all |>
+  # filter(n >= 12) |>
+  anti_join(exclude_combos, by = c("method", "channel", "bp")) |>
+  ggplot(aes(x = cv, y = tidytext::reorder_within(combination, -cv, bp), fill = channel)) +
+  geom_bar(stat = "identity") +
+  tidytext::scale_y_reordered() +
+  scale_x_continuous(labels = percent) +
+  facet_wrap(~ bp, scales = "free_y") +
+  labs(x = "CV", y = NULL) +
+  theme(legend.position = "bottom")
+```
+
+Calculate SEM (√MS_error from the two-way repeated measures ANOVA).
+
+Calculate MDC₉₅ (SEM × 1.96 × √2).
+
+
+Produce Bland-Altman plots using the repeated-measures extension (Bland & Altman 2007). With 3 trials you have 3 pairwise comparisons per participant (T1–T2, T1–T3, T2–T3) — the repeated-measures version handles the non-independence of these pairs correctly. Report bias and LoA with their own 95% CIs.
+
+## Comparing reliability between methods
+
+Run the paired bootstrap for each method pair: resample the 12 participant-level pairs with replacement, compute the mean difference in within-subject SD and CV each iteration (10,000 resamples), derive the 95% CI. If the CI excludes zero, conclude the methods differ in reliability.
+
+```{r bootstrap-reli}
+#| fig-height: 14
+
+set.seed(42)
+
+boot_reli <- dat_all_wide |>
+  group_by(channel, bp) |>
+  nest() |>
+  mutate(result = map(data, \(d) {
+    pairs <- combn(unique(d$method), 2, simplify = FALSE)
+    map_dfr(pairs, \(pair) {
+      d_wide <- d |>
+        filter(method %in% pair) |>
+        pivot_wider(id_cols = id, names_from = method,
+                    values_from = c(sd_power, cv_power))
+
+      sd1 <- d_wide[[paste0("sd_power_", pair[1])]]
+      sd2 <- d_wide[[paste0("sd_power_", pair[2])]]
+      cv1 <- d_wide[[paste0("cv_power_", pair[1])]]
+      cv2 <- d_wide[[paste0("cv_power_", pair[2])]]
+
+      run_boot <- function(x, y) {
+        ok <- !is.na(x) & !is.na(y)
+        if (sum(ok) < 3) return(tibble(n = sum(ok), mean_diff = NA_real_,
+                                       ci_lower = NA_real_, ci_upper = NA_real_,
+                                       p_raw = NA_real_))
+        res <- boot_t_test(x[ok], y[ok], paired = TRUE, R = 9999)
+        tibble(n = sum(ok), mean_diff = mean(x[ok] - y[ok]),
+               ci_lower = res$conf.int[1], ci_upper = res$conf.int[2],
+               p_raw = res$p.value)
+      }
+
+      bind_rows(
+        run_boot(sd1, sd2) |> mutate(metric = "SD"),
+        run_boot(cv1, cv2) |> mutate(metric = "CV")
+      ) |> mutate(method1 = pair[1], method2 = pair[2])
+    })
+  })) |>
+  select(-data) |>
+  unnest(result) |>
+  mutate(
+    sig  = p_raw < 0.05,
+    pair = paste0(method1, " vs ", method2)
+  )
+
+# ── Figure: SD ────────────────────────────────────────────────────────────────
+boot_reli |>
+  filter(metric == "SD", !is.na(mean_diff)) |>
+  anti_join(rename(exclude_combos, method1 = method), by = c("method1", "channel", "bp")) |>
+  anti_join(rename(exclude_combos, method2 = method), by = c("method2", "channel", "bp")) |>
+  mutate(
+    p_label = case_when(
+      p_raw < 0.001 ~ "p < .001",
+      TRUE          ~ paste0("p = ", round(p_raw, 3))
+    ),
+    bp = factor(bp, levels = c(1, 2), labels = c("BP1", "BP2"))
+  ) |>
+  ggplot(aes(x = mean_diff, y = reorder_within(pair, mean_diff, list(channel, bp)))) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_linerange(aes(xmin = ci_lower, xmax = ci_upper, color = sig)) +
+  geom_point(aes(color = sig)) +
+  geom_text(aes(x = Inf, label = p_label), hjust = 1.05, size = 2.5) +
+  scale_y_reordered() +
+  scale_color_manual(values = c("FALSE" = "black", "TRUE" = "#e63946"),
+                     labels = c("ns", "p < .05")) +
+  facet_grid(bp ~ channel, scales = "free_y") +
+  labs(x = "Mean difference in SD (W)", y = NULL, color = NULL,
+       title = "Pairwise reliability comparison — SD") +
+    theme(legend.position = "bottom")
+
+# ── Figure: CV ────────────────────────────────────────────────────────────────
+boot_reli |>
+  filter(metric == "CV", !is.na(mean_diff)) |>
+  anti_join(rename(exclude_combos, method1 = method), by = c("method1", "channel", "bp")) |>
+  anti_join(rename(exclude_combos, method2 = method), by = c("method2", "channel", "bp")) |>
+  mutate(
+    p_label = case_when(
+      p_raw < 0.001 ~ "p < .001",
+      TRUE          ~ paste0("p = ", round(p_raw, 3))
+    ),
+    bp = factor(bp, levels = c(1, 2), labels = c("BP1", "BP2"))
+  ) |>
+  ggplot(aes(x = mean_diff, y = reorder_within(pair, mean_diff, list(channel, bp)))) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_linerange(aes(xmin = ci_lower, xmax = ci_upper, color = sig)) +
+  geom_point(aes(color = sig)) +
+  geom_text(aes(x = Inf, label = p_label), hjust = 1.05, size = 2.5) +
+  scale_y_reordered() +
+  scale_color_manual(values = c("FALSE" = "black", "TRUE" = "#e63946"),
+                     labels = c("ns", "p < .05")) +
+  facet_grid(bp ~ channel, scales = "free_y") +
+  labs(x = "Mean difference in CV (%)", y = NULL, color = NULL,
+       title = "Pairwise reliability comparison — CV") +
+    theme(legend.position = "bottom")
+
+```
+
+
+## Summary
+
+### Detection failure rates
+
+```{r summary-detection-table}
+bp_failed |>
+  mutate(
+    bp    = factor(bp, levels = c(1, 2), labels = c("BP1", "BP2")),
+    label = paste0(failed, "/", n_total, " (", pct_failed, "%)")
+  ) |>
+  group_by(method, channel) |>
+  mutate(sort_key = mean(pct_failed)) |>
+  ungroup() |>
+  pivot_wider(
+    id_cols    = c(method, channel, sort_key),
+    names_from  = bp,
+    values_from = label,
+    values_fill = "0/0 (0%)"
+  ) |>
+  arrange(sort_key) |>
+  select(-sort_key) |>
+  knitr::kable(
+    col.names = c("Method", "Channel", "BP1", "BP2"),
+    caption   = "Table S1. Failed breakpoint detections per method and channel."
+  )
+```
+
+### Reliability statistics
+
+Main manuscript table: ICC(2,1) with 95% CI, SEM, CV, and MDC₉₅ per method and channel.
+Groups with fewer than 7 observations are excluded.
+
+```{r summary-reli-table}
+icc_all |>
+  # filter(n >= 8) |>
+  anti_join(exclude_combos, by = c("method", "channel", "bp")) |>
+  mutate(
+    BP     = factor(bp, levels = c(1, 2), labels = c("BP1", "BP2")),
+    icc_ci = sprintf("%.2f [%.2f, %.2f]", icc, icc_lower, icc_upper),
+    sem_r  = round(sem, 1),
+    cv_pct = round(cv * 100, 1),
+    mdc_r  = round(mdc95, 1)
+  ) |>
+  arrange(BP, sem) |>
+  select(
+    Method   = method,
+    Channel  = channel,
+    BP,
+    n,
+    `ICC(2,1) [95% CI]` = icc_ci,
+    `SEM (W)`           = sem_r,
+    `CV (%)`            = cv_pct,
+    `MDC₉₅ (W)`        = mdc_r
+  ) |>
+  knitr::kable(caption = "Table 1. Test-retest reliability per method and channel (n >= 12).")
+```
+
+### Channel differences (side comparisons)
+
+Significant pairwise bootstrap comparisons between DOM, NDOM, and AVG.
+
+```{r summary-side-diffs}
+exclude_method_bp  <- exclude_combos |> distinct(method, bp)
+side_diff_filtered <- side_diff_all |>
+  filter(!is.na(p_raw)) |>
+  anti_join(exclude_method_bp, by = c("method", "bp"))
+n_side_total <- nrow(side_diff_filtered)
+n_side_sig   <- sum(side_diff_filtered$sig)
+
+side_diff_filtered |>
+  filter(sig) |>
+  mutate(
+    bp      = factor(bp, levels = c(1, 2), labels = c("BP1", "BP2")),
+    result  = sprintf("Δ = %.1f W [%.1f, %.1f], p = %.3f", mean_diff, ci_lower, ci_upper, p_raw)
+  ) |>
+  arrange(desc(abs(mean_diff))) |>
+  select(
+    Method     = method,
+    BP         = bp,
+    Comparison = comparison,
+    n,
+    Result     = result
+  ) |>
+  knitr::kable(
+    caption = sprintf(
+      "Table S2. Significant channel differences in breakpoint power output (%d of %d comparisons significant, n >= 12).",
+      n_side_sig, n_side_total
+    )
+  )
+```
+
+### Method reliability comparisons
+
+Significant pairwise bootstrap comparisons of within-subject SD and CV between methods.
+
+```{r summary-method-comparisons}
+boot_reli_filtered <- boot_reli |>
+  filter(!is.na(p_raw)) |>
+  anti_join(rename(exclude_combos, method1 = method), by = c("method1", "channel", "bp")) |>
+  anti_join(rename(exclude_combos, method2 = method), by = c("method2", "channel", "bp"))
+
+fmt_reli <- function(data) {
+  data |>
+    mutate(
+      bp     = factor(bp, levels = c(1, 2), labels = c("BP1", "BP2")),
+      result = sprintf("Δ = %.2f [%.2f, %.2f], p = %.3f", mean_diff, ci_lower, ci_upper, p_raw)
+    ) |>
+    arrange(desc(abs(mean_diff))) |>
+    select(Channel = channel, BP = bp, Comparison = pair, n, Result = result)
+}
+
+# SD
+sd_filtered <- boot_reli_filtered |> filter(metric == "SD")
+fmt_reli(filter(sd_filtered, sig)) |>
+  knitr::kable(
+    caption = sprintf(
+      "Table S3a. Significant pairwise differences in within-subject SD between methods (%d of %d comparisons significant, n >= 12).",
+      sum(sd_filtered$sig), nrow(sd_filtered)
+    )
+  )
+
+# CV
+cv_filtered <- boot_reli_filtered |> filter(metric == "CV")
+fmt_reli(filter(cv_filtered, sig)) |>
+  knitr::kable(
+    caption = sprintf(
+      "Table S3b. Significant pairwise differences in CV between methods (%d of %d comparisons significant, n >= 12).",
+      sum(cv_filtered$sig), nrow(cv_filtered)
+    )
+  )
+```
+
+## Discussion
+
+Frame conclusions carefully given n=12: distinguish between "method A showed better reliability" (descriptive) and "methods differed significantly in reliability" (inferential). With this sample size, absence of a significant difference is not equivalence.
+
+## References

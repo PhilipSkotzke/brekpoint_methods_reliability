@@ -1,0 +1,19 @@
+# targets pipeline cache
+_targets/
+
+# raw input data (not for public repo)
+Data/InputData/
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+
+# renv library (keep renv.lock, activate.R, settings.json)
+renv/library/
+renv/staging/
+renv/python/
+
+# OS
+.DS_Store
+Thumbs.db
