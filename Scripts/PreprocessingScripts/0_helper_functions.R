@@ -377,7 +377,7 @@ dmax_family <- function(power, value, loglog = NA_real_, degree = 3) {
   }
 
   cf <- tryCatch(
-    unname(coef(lm(v ~ poly(p, degree, raw = TRUE)))),
+    unname(coef(lm(v ~ stats::poly(p, degree, raw = TRUE)))),
     error = function(e) NULL
   )
   if (is.null(cf) || anyNA(cf)) {
@@ -600,7 +600,7 @@ get_bp_poly <- function(
   fit <- tryCatch(
     stats::lm(
       reformulate(
-        sprintf("poly(power, %d, raw = TRUE)", degree),
+        sprintf("stats::poly(power, %d, raw = TRUE)", degree),
         response = "y"
       ),
       data = sd

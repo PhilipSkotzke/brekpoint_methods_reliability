@@ -38,14 +38,18 @@ preprocess_mnirs <- function(filename, metadata) {
     mnirs::filter_mnirs(
       method = "butter",
       W = 0.02
-    ) |>
+    )
+
+  if ("package:signal" %in% search()) {
+    detach("package:signal")
+  }
+
+  dat |>
     dplyr::mutate(dplyr::across(
       where(is.character),
       ~ suppressWarnings(as.numeric(.x))
     )) |>
     dplyr::mutate(smo2_avg = (.data[["smo2_dom"]] + .data[["smo2_ndom"]]) / 2)
-
-  dat
 }
 
 add_power <- function(dat, filename, metadata, stage_duration_sec = 300L) {
